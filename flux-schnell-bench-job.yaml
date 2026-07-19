@@ -88,11 +88,16 @@ spec:
               CACHE_BEFORE=$(find /tmp/neff_cache -name '*.neff' 2>/dev/null | wc -l)
               echo "NEFFs in cache before: $CACHE_BEFORE (0 = cold compile)"
 
+              # Warmup: DO NOT grep-filter (it hid all compile progress -> looked hung for
+              # hours). Stream the full output so we see per-block compile + any deadlock.
+              # NEURON_LAUNCH_BLOCKING dropped: it serializes every op (huge slowdown) and
+              # we're past the [F139] crash it was for. A --step-timeout in bench.py guards
+              # against the TP-collective deadlock instead of an infinite hang.
               echo "=== [1/3] WARMUP (compile ALL components; not timed) ==="
-              NEURON_RT_NUM_CORES=${TP_DEGREE} NEURON_LAUNCH_BLOCKING=1 \
+              NEURON_RT_NUM_CORES=${TP_DEGREE} \
               torchrun --nproc_per_node ${TP_DEGREE} --rdzv_backend c10d --rdzv_endpoint localhost:29500 \
                 bench.py --warmup 1 --iters 0 \
-                2>&1 | tee "$LOCAL_RESULTS/warmup.txt" | grep -iE "built=|PROVENANCE|compile|FAIL|Error|Traceback|COMPILATION" || echo "WARMUP FAILED"
+                2>&1 | tee "$LOCAL_RESULTS/warmup.txt" || echo "WARMUP FAILED"
 
               echo "=== [2/3] CLEAN RUN (NO profiler) — median of 5 = REAL LATENCY ==="
               NEURON_RT_NUM_CORES=${TP_DEGREE} \
@@ -178,8 +183,14 @@ spec:
               value: "--model-type=transformer"
             - name: NEURON_RT_DBG_INTRA_RDH_CHANNEL_BUFFER_SIZE
               value: "134217728"
+            # TP=1 CONTROL RUN: isolates torch.compile from the TP collective path.
+            # TP>1 shards the FFN (RowwiseParallel -> all_reduce); with per-block
+            # fullgraph=False compile a graph break can straddle the collective and
+            # DEADLOCK all ranks (2h hang, no error). TP=1 has no shard/collective, so
+            # if it compiles+runs clean the hang is proven to be the TP collective, not
+            # the compile. Bump back to "4" only after TP=1 is green.
             - name: TP_DEGREE
-              value: "4"                    # s-lnc2-trn3 = 1 device = 4 NeuronCores
+              value: "1"
             - name: MODEL_NAME
               value: "black-forest-labs/FLUX.1-schnell"
             - name: HEIGHT

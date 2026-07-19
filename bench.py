@@ -104,11 +104,29 @@ def main():
     pipe, rank, world, device = build_pipe()
 
     # ── [1/3] warmup: first full-pipeline run compiles every component's NEFFs. ──
+    # HANG GUARD: a TP collective deadlock (graph break straddling all_reduce) would
+    # hang forever with no error. Arm a watchdog so warmup fails loudly instead. Set
+    # FLUX_WARMUP_TIMEOUT=0 to disable. Only rank 0 needs to print; every rank arms it.
+    import signal
+    timeout_s = int(os.environ.get("FLUX_WARMUP_TIMEOUT", "1800"))
+    if timeout_s > 0:
+        def _bail(signum, frame):
+            raise TimeoutError(
+                f"warmup exceeded {timeout_s}s on rank {rank} — likely a TP collective "
+                f"deadlock (per-block compile graph break straddling all_reduce). "
+                f"Re-run at TP_DEGREE=1 to confirm.")
+        signal.signal(signal.SIGALRM, _bail)
+        signal.alarm(timeout_s)
+
     t0 = time.time()
     img = None
     for _ in range(max(1, args.warmup)):
+        print(f"Rank {rank}: warmup forward start ...", flush=True)
         img = run_once(pipe, args.steps)
+        print(f"Rank {rank}: warmup forward done ({time.time()-t0:.1f}s)", flush=True)
     dist.barrier()
+    if timeout_s > 0:
+        signal.alarm(0)
     built = time.time() - t0
     if rank == 0:
         print(f"built={built:.1f}s  (warmup {max(1, args.warmup)} iter; all components compiled)", flush=True)

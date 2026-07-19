@@ -101,6 +101,7 @@ def compile_transformer_blocks(transformer):
         for i, blk in enumerate(blocks):
             blocks[i] = torch.compile(blk, **kw)
             n += 1
+            logger.info(f"  wrapped {attr}[{i}] ({n} total)")
     r = dist.get_rank() if dist.is_initialized() else 0
     logger.info(f"Rank {r}: compiled {n} transformer blocks per-block (avoids [F139] instruction ceiling)")
     return transformer
