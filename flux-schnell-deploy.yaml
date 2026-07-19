@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: flux-schnell
+  namespace: default
+spec:
+  selector:
+    app: flux-schnell
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: NodePort
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flux-schnell
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flux-schnell
+  template:
+    metadata:
+      labels:
+        app: flux-schnell
+    spec:
+      nodeSelector:
+        node-type: trn3
+      resourceClaims:
+        # schnell (~12B bf16 ~24GB) fits on ONE trn3 device (144GB HBM). count:1 -> 16 pods/node.
+        - name: s-lnc2-trn3
+          resourceClaimTemplateName: s-lnc2-trn3
+      containers:
+        - name: app
+          image: 621547421844.dkr.ecr.us-west-2.amazonaws.com/native-pytorch:2.11.0-neuronx-py312-sdk2.31.0-ubuntu24.04-neurondlcbuilder-development-6486001458-0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - "-exc"
+            - |
+              set -euxo pipefail
+
+              # Clone the project code (serve.py + requirements.txt).
+              git clone -b "${BRANCH:-main}" https://yahavb:${GITHUB_TOKEN}@github.com/yahavb/FLUX.1-schnell.git repo
+              cd repo
+
+              # New DLC image has no auto-activated venv -> target system python3 via --python.
+              UVPY="$(command -v python3)"
+              echo "uv target interpreter: $UVPY"
+              uv pip install --python "$UVPY" -r requirements.txt
+
+              # New SDK image: `huggingface-cli` is removed; use `hf`. HF_TOKEN env is read
+              # automatically by huggingface_hub, but log in explicitly for gated repos.
+              export HF_TOKEN
+              hf auth login --token "$HF_TOKEN" || true
+
+              # Cache the schnell weights on the S3-backed PVC (single HF snapshot dir).
+              export HF_HOME=/var/mdl/hf
+              mkdir -p "$HF_HOME"
+
+              echo "============================================"
+              echo "  FLUX.1-schnell on Trainium (torch.compile, native PyTorch)"
+              echo "  ${WIDTH}x${HEIGHT}, ${NUM_STEPS} steps, guidance ${GUIDANCE_SCALE}"
+              echo "============================================"
+
+              exec uvicorn serve:app --host 0.0.0.0 --port 8000
+          resources:
+            claims:
+              - name: s-lnc2-trn3
+            # s-lnc2-trn3 = 1 device/pod -> 16 pods/node. Node ~191 cpu, ~1957Gi mem,
+            # ~1.84Ti ephemeral -> /16 ~11 cpu, ~122Gi mem, ~115Gi eph. Requests under
+            # those so 16 stack; limits burst.
+            requests:
+              cpu: 10
+              memory: 110Gi
+              ephemeral-storage: 60Gi
+            limits:
+              cpu: 22
+              memory: 122Gi
+              ephemeral-storage: 100Gi
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: 621547421844-ap-southeast-4-pvc
+              mountPath: /var/mdl
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: NEURON_RT_LOG_LEVEL
+              value: "ERROR"
+            - name: NEURON_CC_LOG_LEVEL
+              value: "ERROR"
+            - name: TORCH_NEURONX_LOG_LEVEL
+              value: "ERROR"
+            - name: NEURON_CC_FLAGS
+              value: "--model-type=transformer"
+            - name: NEURON_RT_DBG_INTRA_RDH_CHANNEL_BUFFER_SIZE
+              value: "134217728"
+            - name: MODEL_NAME
+              value: "black-forest-labs/FLUX.1-schnell"
+            - name: HEIGHT
+              value: "1024"
+            - name: WIDTH
+              value: "1024"
+            - name: NUM_STEPS
+              value: "4"
+            - name: GUIDANCE_SCALE
+              value: "0.0"
+            - name: MAX_SEQ_LEN
+              value: "256"
+            - name: DTYPE
+              value: "bfloat16"
+            - name: COMPILE
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: HF_TOKEN
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: GITHUB_TOKEN
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 475        # first-call NEFF compile can take many minutes
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 600
+            periodSeconds: 300
+            failureThreshold: 1000
+            timeoutSeconds: 60
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+        - name: 621547421844-ap-southeast-4-pvc
+          persistentVolumeClaim:
+            claimName: 621547421844-ap-southeast-4-pvc

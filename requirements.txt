@@ -1,0 +1,13 @@
+# Installed at container start via `uv pip install --python $(command -v python3)`.
+# torch / torch-neuronx / neuronx-cc come from the base image (SDK 2.31 native-pytorch),
+# so they are NOT pinned here.
+diffusers==0.39.0
+transformers==5.8.1
+sentencepiece
+protobuf
+accelerate
+huggingface_hub
+pillow
+fastapi
+uvicorn[standard]
+python-multipart
