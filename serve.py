@@ -129,6 +129,14 @@ def load():
     pipe.transformer.to(device)
     pipe.vae.to(device)
 
+    # With the text encoders on CPU, diffusers' _execution_device property (derived from
+    # module placement) resolves to CPU, so the pipeline allocates the initial latents on
+    # CPU and hands them to the on-device transformer -> "input tensor is on cpu, expected
+    # neuron" at x_embedder. Force the execution device to neuron so latents are created
+    # on-device (the transformer+VAE compute all lives there; text embeds are moved to
+    # device in _encode_on_host before pipe() is called).
+    type(pipe)._execution_device = property(lambda self: device)
+
     logger.info("Per-block compile of transformer (backend='neuron') ...")
     pipe.transformer = compile_transformer_blocks(pipe.transformer)
 
