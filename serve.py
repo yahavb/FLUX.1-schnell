@@ -1,19 +1,14 @@
 """
 FLUX.1-schnell text-to-image endpoint on AWS Trainium (Neuron), PyTorch-native.
 
-Loads black-forest-labs/FLUX.1-schnell via diffusers.FluxPipeline, moves it to the
-Neuron device, torch.compile(backend="neuron")s the heavy transformer (the ~12B DiT
-backbone), warms it up (first-call NEFF compile), and serves generation over FastAPI.
+- Loads black-forest-labs/FLUX.1-schnell (diffusers FluxPipeline), whole pipeline on Neuron.
+- Tensor-parallel (FFN-only) shards the DiT transformer across the rank's NeuronCores.
+- torch.compile(backend="neuron") on the transformer.
+- Replaces the VAE decoder's nearest-neighbor Upsample2D (which neuronx-cc cannot
+  compile — [F139] on aten.upsample_nearest2d) with a NKI kernel (nki_upsample.py).
+- torchrun launches TP_DEGREE ranks; rank 0 serves FastAPI, others run the TP worker loop.
 
-FLUX.1-schnell is timestep-distilled: run ~4 steps with guidance_scale=0.0.
-
-Env:
-  MODEL_NAME       black-forest-labs/FLUX.1-schnell
-  HEIGHT, WIDTH    output resolution (default 1024x1024)
-  NUM_STEPS        denoising steps (schnell: 4)
-  MAX_SEQ_LEN      T5 sequence length (default 256 for schnell)
-  DTYPE            bfloat16 (default) | float32
-  COMPILE          "1" to torch.compile the transformer (default), "0" to run eager
+schnell is timestep- + guidance-distilled: 4 steps, guidance_scale=0.0.
 """
 import os
 import time
@@ -23,114 +18,179 @@ from io import BytesIO
 from typing import Optional
 
 import torch
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+import torch.distributed as dist
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor.parallel import (
+    ColwiseParallel, RowwiseParallel, parallelize_module)
+
+from nki_upsample import upsample_nearest2x
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("flux-schnell")
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "black-forest-labs/FLUX.1-schnell")
-HEIGHT = int(os.environ.get("HEIGHT", 1024))
-WIDTH = int(os.environ.get("WIDTH", 1024))
-NUM_STEPS = int(os.environ.get("NUM_STEPS", 4))          # schnell is 4-step distilled
-GUIDANCE = float(os.environ.get("GUIDANCE_SCALE", 0.0))  # schnell: guidance-distilled -> 0.0
+HEIGHT = int(os.environ.get("HEIGHT", 480))
+WIDTH = int(os.environ.get("WIDTH", 640))
+NUM_STEPS = int(os.environ.get("NUM_STEPS", 4))
+GUIDANCE = float(os.environ.get("GUIDANCE_SCALE", 0.0))
 MAX_SEQ_LEN = int(os.environ.get("MAX_SEQ_LEN", 256))
 DTYPE = torch.bfloat16 if os.environ.get("DTYPE", "bfloat16") == "bfloat16" else torch.float32
-COMPILE = os.environ.get("COMPILE", "1") == "1"
-DEVICE = os.environ.get("DEVICE", "neuron")
-
-app = FastAPI(title="FLUX.1-schnell (Neuron)")
 
 pipe = None
+device = None
+rank = 0
+world_size = 1
 _ready = False
 
 
+class NkiNearestUpsample(torch.nn.Module):
+    """Drop-in replacement for diffusers Upsample2D when it does nearest 2x upsample.
+    Wraps the original module: applies the NKI 2x upsample kernel, then the original
+    module's post-upsample conv (if any). Only valid for scale_factor=2 / mode=nearest."""
+    def __init__(self, orig):
+        super().__init__()
+        self.conv = getattr(orig, "conv", None)
+
+    def forward(self, hidden_states, output_size=None, *args, **kwargs):
+        hidden_states = upsample_nearest2x(hidden_states.contiguous())
+        if self.conv is not None:
+            hidden_states = self.conv(hidden_states)
+        return hidden_states
+
+
+def _swap_vae_upsamplers(vae):
+    """Replace every nearest-mode Upsample2D in the VAE decoder with the NKI version."""
+    from diffusers.models.upsampling import Upsample2D
+    n = 0
+    for parent in vae.modules():
+        for name, child in list(parent.named_children()):
+            if isinstance(child, Upsample2D):
+                setattr(parent, name, NkiNearestUpsample(child))
+                n += 1
+    logger.info(f"Rank {rank}: replaced {n} VAE Upsample2D modules with NKI kernel")
+
+
+def shard_transformer(transformer, mesh):
+    """FFN-only tensor parallelism (mirrors t5 apply_ffn_tp). Attention stays replicated
+    (Colwise on to_q/k/v splits head_dim and breaks the per-head QK RMSNorm). Only the
+    MLPs are sharded: Colwise in-proj + Rowwise out-proj so the matmul all-reduces back."""
+    def tp(module, plan):
+        try:
+            parallelize_module(module, mesh, plan)
+        except Exception as e:
+            logger.warning(f"TP skip {type(module).__name__}: {e}")
+
+    for blk in getattr(transformer, "transformer_blocks", []):
+        tp(blk.ff, {"net.0.proj": ColwiseParallel(), "net.2": RowwiseParallel()})
+        tp(blk.ff_context, {"net.0.proj": ColwiseParallel(), "net.2": RowwiseParallel()})
+    return transformer
+
+
 def load():
-    global pipe, _ready
+    global pipe, device, rank, world_size, _ready
     from diffusers import FluxPipeline
 
-    logger.info(f"Loading {MODEL_NAME} (dtype={DTYPE}) ...")
+    dist.init_process_group(backend="neuron")
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    device = torch.device(f"neuron:{rank}")
+    logger.info(f"Rank {rank}/{world_size} device={device}")
+
+    logger.info(f"Rank {rank}: loading {MODEL_NAME} (dtype={DTYPE}) ...")
     pipe = FluxPipeline.from_pretrained(MODEL_NAME, torch_dtype=DTYPE)
 
-    # Move to Neuron. NOTE: assign-style materialization matters on the newer torch
-    # stack (models may build on meta); FluxPipeline.from_pretrained loads real weights,
-    # then .to(device) places them on-device.
-    logger.info(f"Moving pipeline to {DEVICE} ...")
-    pipe.to(DEVICE)
+    # Swap VAE nearest-upsamplers to the NKI kernel BEFORE moving to device.
+    _swap_vae_upsamplers(pipe.vae)
 
-    if COMPILE:
-        # Compile the heavy DiT backbone (the transformer) with the Neuron backend.
-        # Keep the VAE / text encoders eager first; add them once the transformer compiles.
-        logger.info("torch.compile(transformer, backend='neuron') ...")
-        pipe.transformer = torch.compile(
-            pipe.transformer, backend="neuron", fullgraph=False, dynamic=False
-        )
+    logger.info(f"Rank {rank}: moving pipeline to {device} ...")
+    pipe.to(device)
 
-    # Warmup: triggers first-call NEFF compilation (minutes) at the fixed HxW.
-    logger.info(f"Warmup generate {WIDTH}x{HEIGHT}, {NUM_STEPS} steps (NEFF compile) ...")
+    if world_size > 1:
+        logger.info(f"Rank {rank}: TP-sharding transformer over {world_size} devices ...")
+        mesh = DeviceMesh("neuron", list(range(world_size)))
+        pipe.transformer = shard_transformer(pipe.transformer, mesh)
+
+    logger.info(f"Rank {rank}: torch.compile(transformer, backend='neuron') ...")
+    pipe.transformer = torch.compile(pipe.transformer, backend="neuron",
+                                     fullgraph=False, dynamic=False)
+
+    logger.info(f"Rank {rank}: warmup {WIDTH}x{HEIGHT} {NUM_STEPS} steps (NEFF compile) ...")
     t0 = time.time()
-    _ = pipe(
-        "warmup",
-        height=HEIGHT, width=WIDTH,
-        num_inference_steps=NUM_STEPS, guidance_scale=GUIDANCE,
-        max_sequence_length=MAX_SEQ_LEN,
-        generator=torch.Generator().manual_seed(0),
-    )
-    logger.info(f"Warmup done in {time.time()-t0:.1f}s — ready.")
+    _run("warmup", NUM_STEPS, None)
+    logger.info(f"Rank {rank}: warmup done in {time.time()-t0:.1f}s")
+    dist.barrier()
     _ready = True
 
 
-class GenerateRequest(BaseModel):
-    prompt: str
-    num_inference_steps: Optional[int] = Field(None, ge=1, le=50)
-    seed: Optional[int] = None
+def _run(prompt, steps, seed):
+    gen = torch.Generator().manual_seed(seed) if seed is not None else None
+    out = pipe(prompt, height=HEIGHT, width=WIDTH,
+               num_inference_steps=steps, guidance_scale=GUIDANCE,
+               max_sequence_length=MAX_SEQ_LEN, generator=gen)
+    return out.images[0]
 
 
-class GenerateResponse(BaseModel):
-    image: str = Field(..., description="Base64-encoded PNG")
-    latency_s: float
+def worker_loop():
+    logger.info(f"Rank {rank}: worker loop")
+    while True:
+        sig = torch.zeros(2, dtype=torch.int64, device=device)  # [cmd, steps]
+        dist.broadcast(sig, src=0)
+        if sig[0].item() == 0:
+            break
+        _run("worker", int(sig[1].item()) or NUM_STEPS, 0)
 
 
-@app.on_event("startup")
-def _startup():
+def run_server():
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel, Field
+    import uvicorn
+
+    app = FastAPI(title="FLUX.1-schnell (Neuron, TP)")
+
+    class GenReq(BaseModel):
+        prompt: str
+        num_inference_steps: Optional[int] = Field(None, ge=1, le=50)
+        seed: Optional[int] = None
+
+    class GenResp(BaseModel):
+        image: str
+        latency_s: float
+        tp_degree: int
+
+    @app.get("/health")
+    def health():
+        return {"status": "healthy", "tp_degree": world_size}
+
+    @app.get("/readiness")
+    def readiness():
+        if not _ready:
+            raise HTTPException(status_code=503, detail="not ready")
+        return {"status": "ready", "tp_degree": world_size}
+
+    @app.post("/generate", response_model=GenResp)
+    def generate(req: GenReq):
+        if not _ready:
+            raise HTTPException(status_code=503, detail="not ready")
+        steps = req.num_inference_steps or NUM_STEPS
+        if world_size > 1:
+            dist.broadcast(torch.tensor([1, steps], dtype=torch.int64, device=device), src=0)
+        t0 = time.time()
+        img = _run(req.prompt, steps, req.seed)
+        buf = BytesIO(); img.save(buf, format="PNG")
+        return GenResp(image=base64.b64encode(buf.getvalue()).decode(),
+                       latency_s=round(time.time()-t0, 3), tp_degree=world_size)
+
+    logger.info("Rank 0: starting uvicorn on :8000")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+def main():
     load()
-
-
-@app.get("/health")
-def health():
-    return {"status": "healthy", "model": MODEL_NAME, "compiled": COMPILE}
-
-
-@app.get("/readiness")
-def readiness():
-    if not _ready:
-        raise HTTPException(status_code=503, detail="model not ready")
-    return {"status": "ready"}
-
-
-@app.post("/generate", response_model=GenerateResponse)
-def generate(req: GenerateRequest):
-    if not _ready:
-        raise HTTPException(status_code=503, detail="model not ready")
-    steps = req.num_inference_steps or NUM_STEPS
-    gen = torch.Generator().manual_seed(req.seed) if req.seed is not None else None
-    t0 = time.time()
-    out = pipe(
-        req.prompt,
-        height=HEIGHT, width=WIDTH,
-        num_inference_steps=steps, guidance_scale=GUIDANCE,
-        max_sequence_length=MAX_SEQ_LEN,
-        generator=gen,
-    )
-    img = out.images[0]
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return GenerateResponse(
-        image=base64.b64encode(buf.getvalue()).decode(),
-        latency_s=round(time.time() - t0, 3),
-    )
+    if rank == 0:
+        run_server()
+    else:
+        worker_loop()
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    main()
