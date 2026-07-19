@@ -76,7 +76,10 @@ def build_pipe():
         pipe.text_encoder = _compile(pipe.text_encoder, "text_encoder [CLIP]", rank)
     if getattr(pipe, "text_encoder_2", None) is not None:
         pipe.text_encoder_2 = _compile(pipe.text_encoder_2, "text_encoder_2 [T5]", rank)
-    pipe.transformer = _compile(pipe.transformer, "transformer [DiT]", rank)
+    # DiT: compile PER-BLOCK, not one fullgraph — the whole-transformer graph exceeds
+    # neuronx-cc's ~5M-instruction ceiling -> [F139] (see serve.compile_transformer_blocks).
+    logger.info(f"Rank {rank}: per-block compile of transformer [DiT] ...")
+    pipe.transformer = serve.compile_transformer_blocks(pipe.transformer)
     # VAE latent->pixel is pipe.vae.decode(z) -> self.decoder(z); compile the decoder.
     pipe.vae.decoder = _compile(pipe.vae.decoder, "vae.decoder [latent->pixel]", rank)
 

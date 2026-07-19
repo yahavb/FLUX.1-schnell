@@ -28,6 +28,18 @@ from nki_upsample import upsample_nearest2x
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("flux-schnell")
 
+# Per-block compilation wraps dozens of distinct transformer blocks; the default
+# TorchDynamo cache (8) then trips FailOnRecompileLimitHit during warmup. Raise it,
+# mirroring the proven PAVEDigitalTwinDiffusion port (neuron_enhancer.py sets 128).
+try:
+    import torch._dynamo as _dynamo
+    _dynamo.config.cache_size_limit = max(getattr(_dynamo.config, "cache_size_limit", 8), 128)
+    if hasattr(_dynamo.config, "accumulated_cache_size_limit"):
+        _dynamo.config.accumulated_cache_size_limit = max(
+            getattr(_dynamo.config, "accumulated_cache_size_limit", 256), 4096)
+except Exception:
+    pass
+
 MODEL_NAME = os.environ.get("MODEL_NAME", "black-forest-labs/FLUX.1-schnell")
 HEIGHT = int(os.environ.get("HEIGHT", 480))
 WIDTH = int(os.environ.get("WIDTH", 640))
@@ -70,6 +82,30 @@ def _swap_vae_upsamplers(vae):
     logger.info(f"Rank {rank}: replaced {n} VAE Upsample2D modules with NKI kernel")
 
 
+def compile_transformer_blocks(transformer):
+    """Compile the DiT transformer PER-BLOCK instead of one fullgraph NEFF.
+
+    Flux's transformer as a single graph exceeds neuronx-cc's ~5M-instruction ceiling
+    -> [F139] neuronx-cc terminated abnormally (same failure class the PAVE port hit as
+    NCC_IXTP002 on the SD-turbo VAE decoder, fixed there via per-leaf compile in
+    neuron_enhancer._compile_leaf_blocks). Compiling each transformer_block +
+    single_transformer_block separately keeps every NEFF under the ceiling while the
+    thin top-level forward glue (embeds, norm_out, proj_out) stays eager.
+    """
+    kw = dict(backend="neuron", fullgraph=False, dynamic=False)
+    n = 0
+    for attr in ("transformer_blocks", "single_transformer_blocks"):
+        blocks = getattr(transformer, attr, None)
+        if blocks is None:
+            continue
+        for i, blk in enumerate(blocks):
+            blocks[i] = torch.compile(blk, **kw)
+            n += 1
+    r = dist.get_rank() if dist.is_initialized() else 0
+    logger.info(f"Rank {r}: compiled {n} transformer blocks per-block (avoids [F139] instruction ceiling)")
+    return transformer
+
+
 def shard_transformer(transformer, mesh):
     """FFN-only tensor parallelism (mirrors t5 apply_ffn_tp). Attention stays replicated
     (Colwise on to_q/k/v splits head_dim and breaks the per-head QK RMSNorm). Only the
@@ -110,9 +146,8 @@ def load():
         mesh = DeviceMesh("neuron", list(range(world_size)))
         pipe.transformer = shard_transformer(pipe.transformer, mesh)
 
-    logger.info(f"Rank {rank}: torch.compile(transformer, backend='neuron') ...")
-    pipe.transformer = torch.compile(pipe.transformer, backend="neuron",
-                                     fullgraph=False, dynamic=False)
+    logger.info(f"Rank {rank}: per-block compile of transformer (backend='neuron') ...")
+    pipe.transformer = compile_transformer_blocks(pipe.transformer)
 
     logger.info(f"Rank {rank}: warmup {WIDTH}x{HEIGHT} {NUM_STEPS} steps (NEFF compile) ...")
     t0 = time.time()
