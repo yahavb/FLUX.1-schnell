@@ -102,6 +102,28 @@ spec:
               grep -q "median=" "$LOCAL_RESULTS/clean.txt" && echo "CLEAN RUN OK" || echo "CLEAN RUN FAILED"
               T_CLEAN=$(grep -oE "median=[0-9.]+ms" "$LOCAL_RESULTS/clean.txt" | head -1)
 
+              # ─── PERSIST IMAGE EARLY (right after generation, BEFORE the slow profiler) ───
+              # /tmp dies with the pod; the profiler stage takes many minutes over ~117 NEFFs.
+              # Copy the raw PNG to the S3-backed PVC NOW so we never wait on (or lose it to)
+              # profiling. Named by pod: /var/mdl/flux_schnell/runs/<pod>_<ts>.png.
+              TS=$(date +%Y%m%d_%H%M%S); POD="$(hostname)"
+              OUT_DIR="/var/mdl/flux_schnell/runs"; mkdir -p "$OUT_DIR"
+              if [ -f /tmp/flux_out.png ]; then
+                cp /tmp/flux_out.png "$OUT_DIR/${POD}_${TS}.png"
+                ls -la "$OUT_DIR/${POD}_${TS}.png"
+                echo "SAVED IMAGE -> $OUT_DIR/${POD}_${TS}.png"
+              else
+                echo "ERROR: /tmp/flux_out.png missing — generation did not produce an image"
+              fi
+
+              # Profiler stage is OFF by default (RUN_PROFILER=1 to enable). It is slow
+              # (per-NEFF capture over ~117 NEFFs) and irrelevant while validating output.
+              if [ "${RUN_PROFILER:-0}" != "1" ]; then
+                echo "=== [3] PROFILER SKIPPED (set RUN_PROFILER=1 to enable) ==="
+                echo "════════════ BENCH DONE ════════════"
+                exit 0
+              fi
+
               echo "=== [3/3] PROFILED RUN (NEURON_RT_INSPECT_ENABLE=1 — overhead delta) ==="
               NEURON_RT_INSPECT_ENABLE=1 \
               python3 bench.py --warmup 1 --iters 5 2>&1 | tee "$LOCAL_RESULTS/profiled.txt" | grep -iE "built=|median|throughput" || true

@@ -136,6 +136,15 @@ def load():
     # fp32 VAE would dtype-mismatch. Wrap decode to upcast the incoming latent to fp32.
     _orig_decode = pipe.vae.decode
     def _decode_fp32(z, *a, **k):
+        # PROBE: the latent entering the VAE. If this is already NaN/near-zero, the fault
+        # is UPSTREAM (transformer/embeds), not the VAE — no decode precision can fix it.
+        try:
+            zf = z.float()
+            logger.info(f"[PROBE] pre-decode latent: shape={tuple(z.shape)} dtype={z.dtype} "
+                        f"nan={torch.isnan(zf).any().item()} inf={torch.isinf(zf).any().item()} "
+                        f"min={zf.min().item():.4f} max={zf.max().item():.4f} absmean={zf.abs().mean().item():.4f}")
+        except Exception as e:
+            logger.info(f"[PROBE] pre-decode latent stats failed: {e}")
         return _orig_decode(z.to(torch.float32), *a, **k)
     pipe.vae.decode = _decode_fp32
 
@@ -166,6 +175,13 @@ def _encode_on_host(prompt):
         prompt=prompt, prompt_2=prompt, device=torch.device("cpu"),
         num_images_per_prompt=1, max_sequence_length=MAX_SEQ_LEN,
     )
+    # PROBE: host-encoded embeds. If these are NaN/all-zero, the fault is the text-encode
+    # path (CPU encoders / prompt_2 handling), not the transformer or VAE.
+    pe, po = prompt_embeds.float(), pooled_prompt_embeds.float()
+    logger.info(f"[PROBE] embeds: prompt shape={tuple(prompt_embeds.shape)} "
+                f"nan={torch.isnan(pe).any().item()} absmean={pe.abs().mean().item():.4f} | "
+                f"pooled shape={tuple(pooled_prompt_embeds.shape)} "
+                f"nan={torch.isnan(po).any().item()} absmean={po.abs().mean().item():.4f}")
     return (prompt_embeds.to(device=device, dtype=DTYPE),
             pooled_prompt_embeds.to(device=device, dtype=DTYPE))
 
@@ -175,8 +191,14 @@ def _run(prompt, steps, seed):
     gen = torch.Generator().manual_seed(seed) if seed is not None else None
     out = pipe(prompt_embeds=prompt_embeds, pooled_prompt_embeds=pooled,
                height=HEIGHT, width=WIDTH, num_inference_steps=steps,
-               guidance_scale=GUIDANCE, generator=gen)
-    return out.images[0]
+               guidance_scale=GUIDANCE, generator=gen, output_type="pil")
+    img = out.images[0]
+    # PROBE: the final PIL image. extrema (min,max) per band == same value -> solid/blank.
+    try:
+        logger.info(f"[PROBE] output image: size={img.size} mode={img.mode} extrema={img.getextrema()}")
+    except Exception as e:
+        logger.info(f"[PROBE] output image stats failed: {e}")
+    return img
 
 
 def run_server():
