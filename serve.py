@@ -100,11 +100,42 @@ def compile_transformer_blocks(transformer):
     # per-block compile is the cause:
     #   FLUX_COMPILE_MODE=none      -> eager transformer (no compile) — control
     #   FLUX_COMPILE_MODE=per_block -> compile each block (default; the [F139] workaround)
-    mode = os.environ.get("FLUX_COMPILE_MODE", "per_block")
+    # PROVEN (eager control run xg7rl): eager transformer gives a FINITE latent + a real
+    # image, so the model/VAE/dtype are all correct. per_block compile gives a fully-NaN
+    # latent -> the fault is compiling WHOLE blocks: the block forward applies
+    # image_rotary_emb (a cos/sin tuple) and threads a dual-stream residual; wrapping the
+    # whole block corrupts that across the graph boundary.
+    #   FLUX_COMPILE_MODE=none      -> eager (correct, but slow: 5015ms; hits no [F139])
+    #   FLUX_COMPILE_MODE=per_block -> compile whole blocks (FAST 3533ms but NaN — broken)
+    #   FLUX_COMPILE_MODE=leaf      -> compile the heavy LEAF submods (attn + FF) INSIDE
+    #        each block, leaving the rotary application + residual adds eager. Mirrors the
+    #        PAVE port's _compile_leaf_blocks philosophy (compile leaves, not containers):
+    #        NEFFs stay small (clears [F139]) and the rotary/residual glue stays eager
+    #        (preserves the numerics that per_block broke).
+    mode = os.environ.get("FLUX_COMPILE_MODE", "leaf")
     if mode == "none":
         logger.info("FLUX_COMPILE_MODE=none -> transformer runs EAGER (control run, no compile)")
         return transformer
     kw = dict(backend="neuron", fullgraph=False, dynamic=False)
+    if mode == "leaf":
+        # Compile the heavy leaf submodules of each block (attn + feed-forward), NOT the
+        # block itself. These names cover both FluxTransformerBlock (attn/ff/ff_context)
+        # and FluxSingleTransformerBlock (attn/proj_mlp/proj_out).
+        LEAF_ATTRS = ("attn", "ff", "ff_context", "proj_mlp", "proj_out")
+        n = 0
+        for attr in ("transformer_blocks", "single_transformer_blocks"):
+            blocks = getattr(transformer, attr, None)
+            if blocks is None:
+                continue
+            for blk in blocks:
+                for la in LEAF_ATTRS:
+                    sub = getattr(blk, la, None)
+                    if sub is not None and isinstance(sub, torch.nn.Module):
+                        setattr(blk, la, torch.compile(sub, **kw))
+                        n += 1
+        logger.info(f"Compiled {n} leaf submodules (attn+FF) INSIDE blocks — rotary/residual stay eager")
+        return transformer
+    # mode == per_block (known-broken; kept for A/B provenance)
     n = 0
     for attr in ("transformer_blocks", "single_transformer_blocks"):
         blocks = getattr(transformer, attr, None)
@@ -113,7 +144,7 @@ def compile_transformer_blocks(transformer):
         for i in range(len(blocks)):
             blocks[i] = torch.compile(blocks[i], **kw)
             n += 1
-    logger.info(f"Compiled {n} transformer blocks per-block (avoids [F139] instruction ceiling)")
+    logger.info(f"Compiled {n} transformer blocks per-block (FAST but produces NaN — broken)")
     return transformer
 
 

@@ -222,12 +222,12 @@ spec:
             # Single-core (no TP): serve.py pins NEURON_RT_VISIBLE_CORES=0 and runs the
             # whole pipeline on one core, matching the proven pave t2i recipe. The pave
             # opt-log (#15/#16/#17) shows every inter-core split regressed for diffusion.
-            # DECISIVE CONTROL: run the transformer EAGER (no compile). Isolates the all-NaN
-            # latent — if eager latent is finite, per-block compile is the cause; if eager is
-            # also NaN, it's the model/dtype path (compile is innocent). Three dtype guesses
-            # failed to move the nan= bit; this answers it directly.
+            # Eager (none) proved correct but slow (5015ms) & hits [F139] if it ever traced
+            # one graph. per_block was fast but NaN. leaf = compile attn+FF INSIDE each block
+            # (small NEFFs, clears [F139]) while rotary/residual glue stays eager (keeps the
+            # numerics eager proved correct). This is the candidate production mode.
             - name: FLUX_COMPILE_MODE
-              value: "none"
+              value: "leaf"
             - name: MODEL_NAME
               value: "black-forest-labs/FLUX.1-schnell"
             - name: HEIGHT
