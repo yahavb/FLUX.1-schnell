@@ -141,19 +141,23 @@ spec:
               #     Copy the RAW PNG (viewable, not tarred) to a timestamped dir, LOUDLY:
               #     no 2>/dev/null hiding a failed copy, and fail the step if the image
               #     didn't land, so we never silently lose the output. ───
+              # bench.py writes the PNG to /tmp (fast local disk). Before the container
+              # exits, copy it to /var/mdl (S3-backed, survives the pod) NAMED BY THE JOB:
+              # $(hostname) is the pod name (e.g. flux-schnell-bench-9jl62). Loud on missing.
               TS=$(date +%Y%m%d_%H%M%S)
-              OUT_DIR="/var/mdl/flux_schnell/runs/${TS}"
+              POD="$(hostname)"
+              OUT_DIR="/var/mdl/flux_schnell/runs"
               mkdir -p "$OUT_DIR"
               if [ -f /tmp/flux_out.png ]; then
-                cp /tmp/flux_out.png "$OUT_DIR/flux_out.png"
-                cp "$LOCAL_RESULTS"/*.txt "$OUT_DIR/" 2>/dev/null || true
-                ls -la "$OUT_DIR/flux_out.png"
-                echo "SAVED IMAGE -> $OUT_DIR/flux_out.png   (pull: kubectl cp does NOT work post-Job; read it off the PVC)"
+                DEST="$OUT_DIR/${POD}_${TS}.png"
+                cp /tmp/flux_out.png "$DEST"
+                ls -la "$DEST"
+                echo "SAVED IMAGE -> $DEST"
               else
                 echo "ERROR: /tmp/flux_out.png missing — generation did not produce an image"
               fi
-              # bonus: full results tar alongside the raw png
-              tar -czf "$OUT_DIR/results.tar.gz" -C "$(dirname "$LOCAL_RESULTS")" "$(basename "$LOCAL_RESULTS")" 2>/dev/null || true
+              # bonus: results txts tarred alongside, same job-named prefix
+              tar -czf "$OUT_DIR/${POD}_${TS}_results.tar.gz" -C "$(dirname "$LOCAL_RESULTS")" "$(basename "$LOCAL_RESULTS")" 2>/dev/null || true
               echo "════════════ BENCH DONE ════════════"
           resources:
             claims:
