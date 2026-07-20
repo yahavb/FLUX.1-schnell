@@ -72,11 +72,10 @@ spec:
               echo "  ${WIDTH}x${HEIGHT}, ${NUM_STEPS} steps, guidance ${GUIDANCE_SCALE}"
               echo "============================================"
 
-              NEURON_RT_NUM_CORES=${TP_DEGREE} \
-              torchrun --nproc_per_node ${TP_DEGREE} \
-                --rdzv_backend c10d \
-                --rdzv_endpoint localhost:29500 \
-                serve.py
+              # SINGLE CORE, plain python3 (no torchrun/TP). serve.py pins
+              # NEURON_RT_VISIBLE_CORES=0, runs text encoders eager on host, compiles the
+              # transformer FF submodules (attn eager — compiling flux attn NaNs), VAE fp32.
+              python3 serve.py
           resources:
             claims:
               - name: s-lnc2-trn3
@@ -98,23 +97,21 @@ spec:
           env:
             - name: PYTHONUNBUFFERED
               value: "1"
-            # DIAGNOSE the VAE [F139] neuronx-cc crash: LAUNCH_BLOCKING makes the traceback
-            # point at the REAL failing op (not the .cpu() sync point in postprocess);
-            # CC_LOG_LEVEL=INFO surfaces the actual compiler diagnostic instead of hiding it.
-            - name: NEURON_LAUNCH_BLOCKING
-              value: "1"
             - name: NEURON_RT_LOG_LEVEL
-              value: "INFO"
+              value: "ERROR"
             - name: NEURON_CC_LOG_LEVEL
-              value: "INFO"
+              value: "ERROR"
             - name: TORCH_NEURONX_LOG_LEVEL
-              value: "INFO"
+              value: "ERROR"
             - name: NEURON_CC_FLAGS
               value: "--model-type=transformer"
             - name: NEURON_RT_DBG_INTRA_RDH_CHANNEL_BUFFER_SIZE
               value: "134217728"
-            - name: TP_DEGREE
-              value: "4"                    # s-lnc2-trn3 = 1 device = 4 NeuronCores
+            # PROVEN serve config (bench run cl8rs): compile the transformer FF submodules,
+            # keep attention EAGER (compiling flux attn -> NaN/black image on this SDK).
+            # Correct image, ~4770ms/img at 640x480, single core.
+            - name: FLUX_COMPILE_MODE
+              value: "ff_only"
             - name: MODEL_NAME
               value: "black-forest-labs/FLUX.1-schnell"
             - name: HEIGHT

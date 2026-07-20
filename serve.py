@@ -112,7 +112,13 @@ def compile_transformer_blocks(transformer):
     #        PAVE port's _compile_leaf_blocks philosophy (compile leaves, not containers):
     #        NEFFs stay small (clears [F139]) and the rotary/residual glue stays eager
     #        (preserves the numerics that per_block broke).
-    mode = os.environ.get("FLUX_COMPILE_MODE", "leaf")
+    # DEFAULT ff_only: the PROVEN correct-and-compiled config (run cl8rs). Compiling the
+    # attention submodule produces a NaN latent on this SDK (rotary applied inside attn is
+    # miscompiled by neuronx-cc); FF compiles fine. So we compile FF, keep attn eager.
+    #   ff_only (default) -> FF compiled + attn eager: CORRECT image, ~4770ms
+    #   none              -> fully eager: correct, ~5015ms
+    #   leaf / per_block  -> compile attn too: FAST but NaN/black — DO NOT USE
+    mode = os.environ.get("FLUX_COMPILE_MODE", "ff_only")
     if mode == "none":
         logger.info("FLUX_COMPILE_MODE=none -> transformer runs EAGER (control run, no compile)")
         return transformer
@@ -213,7 +219,7 @@ def load():
         return tuple(c(a) for a in args), {k: c(v) for k, v in kwargs.items()}
     pipe.transformer.register_forward_pre_hook(_cast_inputs_bf16, with_kwargs=True)
 
-    logger.info("Per-block compile of transformer (backend='neuron') ...")
+    logger.info(f"Compiling transformer (mode={os.environ.get('FLUX_COMPILE_MODE', 'ff_only')}) ...")
     pipe.transformer = compile_transformer_blocks(pipe.transformer)
 
     logger.info(f"Warmup {WIDTH}x{HEIGHT} {NUM_STEPS} steps (NEFF compile) ...")
