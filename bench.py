@@ -29,7 +29,7 @@ import serve
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("flux-bench")
 
-PROMPT = "a photo of an astronaut riding a horse on the moon, high detail"
+PROMPT = os.environ.get("FLUX_PROMPT", "a photo of an astronaut riding a horse on Mars, high detail")
 
 
 def main():

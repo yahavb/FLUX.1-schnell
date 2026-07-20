@@ -90,19 +90,22 @@ spec:
               # No torchrun / no TP / no collectives — matches the proven pave t2i recipe.
               # DO NOT grep-filter warmup (it hid all compile progress -> looked hung for 2h);
               # stream the full output so per-block compile is visible.
+              # Judge success on the ACTUAL marker in the tee'd file, NOT the pipe exit
+              # code — `cmd | tee | grep || echo FAILED` fires on grep's exit even when the
+              # run succeeded (prior logs showed bogus "WARMUP FAILED" after built=/median=).
               echo "=== [1/3] WARMUP (compile transformer per-block + VAE; not timed) ==="
-              python3 bench.py --warmup 1 --iters 0 \
-                2>&1 | tee "$LOCAL_RESULTS/warmup.txt" || echo "WARMUP FAILED"
+              python3 bench.py --warmup 1 --iters 0 2>&1 | tee "$LOCAL_RESULTS/warmup.txt" || true
+              grep -q "built=" "$LOCAL_RESULTS/warmup.txt" && echo "WARMUP OK" || echo "WARMUP FAILED"
 
               echo "=== [2/3] CLEAN RUN (NO profiler) — median of 5 = REAL LATENCY ==="
-              python3 bench.py --warmup 1 --iters 5 \
-                2>&1 | tee "$LOCAL_RESULTS/clean.txt" | grep -iE "built=|median|throughput|VALIDATE|saved:|iter |FAIL" || echo "CLEAN RUN FAILED"
+              python3 bench.py --warmup 1 --iters 5 2>&1 | tee "$LOCAL_RESULTS/clean.txt" | grep -iE "built=|median|throughput|VALIDATE|saved:|iter " || true
+              grep -q "median=" "$LOCAL_RESULTS/clean.txt" && echo "CLEAN RUN OK" || echo "CLEAN RUN FAILED"
               T_CLEAN=$(grep -oE "median=[0-9.]+ms" "$LOCAL_RESULTS/clean.txt" | head -1)
 
               echo "=== [3/3] PROFILED RUN (NEURON_RT_INSPECT_ENABLE=1 — overhead delta) ==="
               NEURON_RT_INSPECT_ENABLE=1 \
-              python3 bench.py --warmup 1 --iters 5 \
-                2>&1 | tee "$LOCAL_RESULTS/profiled.txt" | grep -iE "built=|median|throughput|FAIL" || echo "PROFILED RUN FAILED"
+              python3 bench.py --warmup 1 --iters 5 2>&1 | tee "$LOCAL_RESULTS/profiled.txt" | grep -iE "built=|median|throughput" || true
+              grep -q "median=" "$LOCAL_RESULTS/profiled.txt" && echo "PROFILED RUN OK" || echo "PROFILED RUN FAILED"
               T_PROF=$(grep -oE "median=[0-9.]+ms" "$LOCAL_RESULTS/profiled.txt" | head -1)
 
               echo "=== [4] per-NEFF engine breakdown + dominant-NEFF metrics (neuron-profile CLI) ==="
