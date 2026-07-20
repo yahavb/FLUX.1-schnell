@@ -117,11 +117,16 @@ def compile_transformer_blocks(transformer):
         logger.info("FLUX_COMPILE_MODE=none -> transformer runs EAGER (control run, no compile)")
         return transformer
     kw = dict(backend="neuron", fullgraph=False, dynamic=False)
-    if mode == "leaf":
-        # Compile the heavy leaf submodules of each block (attn + feed-forward), NOT the
-        # block itself. These names cover both FluxTransformerBlock (attn/ff/ff_context)
-        # and FluxSingleTransformerBlock (attn/proj_mlp/proj_out).
-        LEAF_ATTRS = ("attn", "ff", "ff_context", "proj_mlp", "proj_out")
+    if mode in ("leaf", "ff_only"):
+        # leaf: compile attn + FF. ff_only: compile FF submods ONLY, leave attn EAGER.
+        # PROVEN (qcvc9): leaf mode -> NaN, so compiling the ATTN submodule corrupts it
+        # (the rotary cos/sin is applied inside attention; the attn NEFF mishandles it).
+        # ff_only isolates that: if finite -> attn-compile is the exact culprit, ship
+        # FF-compiled + attn-eager; if NaN -> compiling anything NaNs, eager is the answer.
+        if mode == "ff_only":
+            LEAF_ATTRS = ("ff", "ff_context", "proj_mlp", "proj_out")
+        else:
+            LEAF_ATTRS = ("attn", "ff", "ff_context", "proj_mlp", "proj_out")
         n = 0
         for attr in ("transformer_blocks", "single_transformer_blocks"):
             blocks = getattr(transformer, attr, None)

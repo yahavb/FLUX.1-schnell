@@ -222,12 +222,11 @@ spec:
             # Single-core (no TP): serve.py pins NEURON_RT_VISIBLE_CORES=0 and runs the
             # whole pipeline on one core, matching the proven pave t2i recipe. The pave
             # opt-log (#15/#16/#17) shows every inter-core split regressed for diffusion.
-            # Eager (none) proved correct but slow (5015ms) & hits [F139] if it ever traced
-            # one graph. per_block was fast but NaN. leaf = compile attn+FF INSIDE each block
-            # (small NEFFs, clears [F139]) while rotary/residual glue stays eager (keeps the
-            # numerics eager proved correct). This is the candidate production mode.
+            # leaf (attn+FF) also NaN'd (qcvc9) -> compiling the ATTN submodule is what
+            # corrupts it (rotary lives in attn). ff_only compiles FF submods, attn EAGER:
+            # if finite, attn-compile is the exact culprit -> ship FF-compiled+attn-eager.
             - name: FLUX_COMPILE_MODE
-              value: "leaf"
+              value: "ff_only"
             - name: MODEL_NAME
               value: "black-forest-labs/FLUX.1-schnell"
             - name: HEIGHT
