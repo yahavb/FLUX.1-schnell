@@ -165,6 +165,18 @@ def load():
     # device in _encode_on_host before pipe() is called).
     type(pipe)._execution_device = property(lambda self: device)
 
+    # MIXED PRECISION (pave recipe; full fp32 OOMs the 38.6GB HBM). Transformer WEIGHTS
+    # stay bf16 (fits), but the latent/scheduler accumulation runs fp32 to stop the
+    # flow-match overflow -> NaN. We feed the pipeline fp32 prompt_embeds (so diffusers
+    # builds fp32 latents and accumulates the scheduler in fp32); this pre-hook casts the
+    # fp32 latent (+ any float inputs) down to bf16 at the transformer boundary so it
+    # matches the bf16 weights. Output noise_pred is bf16; scheduler.step promotes the
+    # fp32 latent back to fp32. The fp32 latent is ~600KB — no OOM.
+    def _cast_inputs_bf16(_mod, args, kwargs):
+        c = lambda x: x.to(torch.bfloat16) if torch.is_tensor(x) and x.is_floating_point() else x
+        return tuple(c(a) for a in args), {k: c(v) for k, v in kwargs.items()}
+    pipe.transformer.register_forward_pre_hook(_cast_inputs_bf16, with_kwargs=True)
+
     logger.info("Per-block compile of transformer (backend='neuron') ...")
     pipe.transformer = compile_transformer_blocks(pipe.transformer)
 
@@ -191,8 +203,11 @@ def _encode_on_host(prompt):
                 f"nan={torch.isnan(pe).any().item()} absmean={pe.abs().mean().item():.4f} | "
                 f"pooled shape={tuple(pooled_prompt_embeds.shape)} "
                 f"nan={torch.isnan(po).any().item()} absmean={po.abs().mean().item():.4f}")
-    return (prompt_embeds.to(device=device, dtype=DTYPE),
-            pooled_prompt_embeds.to(device=device, dtype=DTYPE))
+    # Return FP32 embeds (NOT DTYPE/bf16): diffusers derives the latent + scheduler dtype
+    # from prompt_embeds.dtype, so fp32 here => fp32 latent accumulation (the NaN fix).
+    # The transformer pre-hook casts these to bf16 at the model boundary.
+    return (prompt_embeds.to(device=device, dtype=torch.float32),
+            pooled_prompt_embeds.to(device=device, dtype=torch.float32))
 
 
 def _run(prompt, steps, seed):

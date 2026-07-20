@@ -237,15 +237,13 @@ spec:
               value: "0.0"
             - name: MAX_SEQ_LEN
               value: "256"
-            # fp32 to test the all-NaN latent fix. ROOT CAUSE (from pave t2i + diffusers
-            # source): diffusers builds latents in prompt_embeds.dtype and FORCES the
-            # scheduler accumulation back to that dtype each step. In bf16, flux's
-            # flow-match velocity accumulation overflows -> inf -> NaN latent (probe:
-            # min=inf max=-inf). pave keeps latents/scheduler in fp32, casting to bf16 only
-            # at the model input. fp32 everywhere is the correctness-first control; once the
-            # image is verified we can reintroduce bf16 only at the transformer forward.
+            # bf16: full fp32 OOMs one core (transformer+VAE = 38.4/38.6GB HBM). The NaN
+            # fix is MIXED precision (pave recipe): transformer weights bf16, but the
+            # latent/scheduler accumulation forced to fp32 in serve.py (fp32 prompt_embeds
+            # -> fp32 latents; a transformer pre-hook casts the latent to bf16 at the model
+            # boundary). fp32 latent is tiny (~600KB), so no OOM.
             - name: DTYPE
-              value: "fp32"
+              value: "bfloat16"
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
