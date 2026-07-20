@@ -222,10 +222,9 @@ spec:
             # Single-core (no TP): serve.py pins NEURON_RT_VISIBLE_CORES=0 and runs the
             # whole pipeline on one core, matching the proven pave t2i recipe. The pave
             # opt-log (#15/#16/#17) shows every inter-core split regressed for diffusion.
-            # A/B for the all-NaN latent: FLUX_COMPILE_MODE=none runs the transformer eager
-            # (control). If eager latent is finite, per-block compile is the NaN cause.
+            # Keep per-block compile ([F139] workaround, independent of the NaN bug).
             - name: FLUX_COMPILE_MODE
-              value: "none"
+              value: "per_block"
             - name: MODEL_NAME
               value: "black-forest-labs/FLUX.1-schnell"
             - name: HEIGHT
@@ -238,8 +237,15 @@ spec:
               value: "0.0"
             - name: MAX_SEQ_LEN
               value: "256"
+            # fp32 to test the all-NaN latent fix. ROOT CAUSE (from pave t2i + diffusers
+            # source): diffusers builds latents in prompt_embeds.dtype and FORCES the
+            # scheduler accumulation back to that dtype each step. In bf16, flux's
+            # flow-match velocity accumulation overflows -> inf -> NaN latent (probe:
+            # min=inf max=-inf). pave keeps latents/scheduler in fp32, casting to bf16 only
+            # at the model input. fp32 everywhere is the correctness-first control; once the
+            # image is verified we can reintroduce bf16 only at the transformer forward.
             - name: DTYPE
-              value: "bfloat16"
+              value: "fp32"
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
