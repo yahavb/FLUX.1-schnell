@@ -222,6 +222,10 @@ spec:
             # Single-core (no TP): serve.py pins NEURON_RT_VISIBLE_CORES=0 and runs the
             # whole pipeline on one core, matching the proven pave t2i recipe. The pave
             # opt-log (#15/#16/#17) shows every inter-core split regressed for diffusion.
+            # A/B for the all-NaN latent: FLUX_COMPILE_MODE=none runs the transformer eager
+            # (control). If eager latent is finite, per-block compile is the NaN cause.
+            - name: FLUX_COMPILE_MODE
+              value: "none"
             - name: MODEL_NAME
               value: "black-forest-labs/FLUX.1-schnell"
             - name: HEIGHT

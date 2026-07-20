@@ -95,6 +95,15 @@ def compile_transformer_blocks(transformer):
     single_transformer_block separately keeps every NEFF under the ceiling while the
     thin top-level forward glue (embeds, norm_out, proj_out) stays eager. Mirrors the
     proven pave per-leaf-block strategy (_compile_leaf_blocks)."""
+    # A/B knob to isolate the all-NaN latent ([PROBE] pre-decode latent nan=True). The
+    # embeds probe is clean, so the fault is the transformer denoise path. Test whether
+    # per-block compile is the cause:
+    #   FLUX_COMPILE_MODE=none      -> eager transformer (no compile) — control
+    #   FLUX_COMPILE_MODE=per_block -> compile each block (default; the [F139] workaround)
+    mode = os.environ.get("FLUX_COMPILE_MODE", "per_block")
+    if mode == "none":
+        logger.info("FLUX_COMPILE_MODE=none -> transformer runs EAGER (control run, no compile)")
+        return transformer
     kw = dict(backend="neuron", fullgraph=False, dynamic=False)
     n = 0
     for attr in ("transformer_blocks", "single_transformer_blocks"):
