@@ -6,7 +6,7 @@ which compiles and generates images on trn3/SDK-2.31:
 
 - SINGLE CORE, no tensor-parallelism, no torchrun/collectives. The pave optimization
   log (#15/#16/#17) shows every inter-core split (SP, TP-conv) REGRESSED for this
-  workload — data-parallel-per-core wins. flux-schnell at these sizes fits on one core.
+  workload — data-parallel-per-core wins. flux at these sizes fits on one core.
 - Text encoders (CLIP + T5) run EAGER ON THE HOST (CPU), NOT compiled and NOT on the
   Neuron device. They are cheap + per-prompt and compiling them adds eager-fallback
   noise. Only the heavy compute (DiT transformer + VAE decode) becomes NEFFs.
@@ -31,7 +31,7 @@ import torch
 from nki_upsample import upsample_nearest2x
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("flux-schnell")
+logger = logging.getLogger("flux")
 
 # Per-block compile wraps dozens of blocks; default TorchDynamo cache (8) trips
 # FailOnRecompileLimitHit. Raise it (proven pave t2i / neuron_enhancer fix).

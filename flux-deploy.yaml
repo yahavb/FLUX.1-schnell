@@ -1,11 +1,11 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: flux-schnell
+  name: flux
   namespace: default
 spec:
   selector:
-    app: flux-schnell
+    app: flux
   ports:
     - port: 8000
       targetPort: 8000
@@ -14,17 +14,17 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: flux-schnell
+  name: flux
   namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: flux-schnell
+      app: flux
   template:
     metadata:
       labels:
-        app: flux-schnell
+        app: flux
     spec:
       nodeSelector:
         node-type: trn3
@@ -68,8 +68,8 @@ spec:
               grep -q "ALL PASS" /tmp/kerneltest.log || { echo "NKI upsample kernel FAILED — not launching pipeline"; exit 1; }
 
               echo "============================================"
-              echo "  FLUX.1-schnell on Trainium (torch.compile + TP=${TP_DEGREE})"
-              echo "  ${WIDTH}x${HEIGHT}, ${NUM_STEPS} steps, guidance ${GUIDANCE_SCALE}"
+              echo "  flux (FLUX.1-schnell) on Trainium — single core, FF torch.compiled"
+              echo "  ${WIDTH}x${HEIGHT}, ${NUM_STEPS} steps, guidance ${GUIDANCE_SCALE}, mode ${FLUX_COMPILE_MODE}"
               echo "============================================"
 
               # SINGLE CORE, plain python3 (no torchrun/TP). serve.py pins

@@ -8,20 +8,20 @@
 # decoder latent->pixel) with NEURON_LAUNCH_BLOCKING=1 so a failure names the op.
 #
 # Launch:
-#   kubectl delete job flux-schnell-bench --ignore-not-found
-#   kubectl apply -f flux-schnell-bench-job.yaml
-#   kubectl logs -f job/flux-schnell-bench
+#   kubectl delete job flux-bench --ignore-not-found
+#   kubectl apply -f flux-bench-job.yaml
+#   kubectl logs -f job/flux-bench
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: flux-schnell-bench
+  name: flux-bench
   namespace: default
 spec:
   backoffLimit: 0
   template:
     metadata:
       labels:
-        app: flux-schnell-bench
+        app: flux-bench
     spec:
       restartPolicy: Never
       nodeSelector:
@@ -78,7 +78,7 @@ spec:
               python3 test_nki_upsample.py | tee /tmp/kerneltest.log
               grep -q "ALL PASS" /tmp/kerneltest.log || { echo "NKI upsample kernel FAILED — aborting"; exit 1; }
 
-              echo "════════════ NEURON 3-RUN BENCHMARK (flux-schnell) ════════════"
+              echo "════════════ NEURON 3-RUN BENCHMARK (flux) ════════════"
               echo "  reference: (bring-up — establish clean latency, no external ref yet)"
               echo "  NOTE: cold compile expected (no NEFF cache tar) — [1/3] built= will be large."
               echo "==============================================================="
@@ -105,9 +105,9 @@ spec:
               # ─── PERSIST IMAGE EARLY (right after generation, BEFORE the slow profiler) ───
               # /tmp dies with the pod; the profiler stage takes many minutes over ~117 NEFFs.
               # Copy the raw PNG to the S3-backed PVC NOW so we never wait on (or lose it to)
-              # profiling. Named by pod: /var/mdl/flux_schnell/runs/<pod>_<ts>.png.
+              # profiling. Named by pod: /var/mdl/flux/runs/<pod>_<ts>.png.
               TS=$(date +%Y%m%d_%H%M%S); POD="$(hostname)"
-              OUT_DIR="/var/mdl/flux_schnell/runs"; mkdir -p "$OUT_DIR"
+              OUT_DIR="/var/mdl/flux/runs"; mkdir -p "$OUT_DIR"
               if [ -f /tmp/flux_out.png ]; then
                 cp /tmp/flux_out.png "$OUT_DIR/${POD}_${TS}.png"
                 ls -la "$OUT_DIR/${POD}_${TS}.png"
@@ -165,10 +165,10 @@ spec:
               #     didn't land, so we never silently lose the output. ───
               # bench.py writes the PNG to /tmp (fast local disk). Before the container
               # exits, copy it to /var/mdl (S3-backed, survives the pod) NAMED BY THE JOB:
-              # $(hostname) is the pod name (e.g. flux-schnell-bench-9jl62). Loud on missing.
+              # $(hostname) is the pod name (e.g. flux-bench-9jl62). Loud on missing.
               TS=$(date +%Y%m%d_%H%M%S)
               POD="$(hostname)"
-              OUT_DIR="/var/mdl/flux_schnell/runs"
+              OUT_DIR="/var/mdl/flux/runs"
               mkdir -p "$OUT_DIR"
               if [ -f /tmp/flux_out.png ]; then
                 DEST="$OUT_DIR/${POD}_${TS}.png"
@@ -208,7 +208,7 @@ spec:
               value: "exp/per-block-compile"
             # Quiet: the runtime NMGR/TDRV/NRT INFO spam (8000+ lines) is pure noise now
             # that per-block compile works. ERROR keeps only real failures + our own
-            # flux-schnell/flux-bench INFO prints (built=/median=/SAVED IMAGE).
+            # flux/flux-bench INFO prints (built=/median=/SAVED IMAGE).
             - name: NEURON_RT_LOG_LEVEL
               value: "ERROR"
             - name: NEURON_CC_LOG_LEVEL

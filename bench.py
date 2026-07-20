@@ -69,7 +69,7 @@ def main():
         outp = os.environ.get("FLUX_OUT", "/tmp/flux_out.png")
         img.save(outp)
         print("=" * 44, flush=True)
-        print("  VALIDATE THE OUTPUT — flux-schnell", flush=True)
+        print("  VALIDATE THE OUTPUT — flux", flush=True)
         print(f"  saved: {outp}  ({serve.WIDTH}x{serve.HEIGHT}, {args.steps} steps, single-core)", flush=True)
         print("  pull: kubectl cp <pod>:%s ./flux_out.png && open ./flux_out.png" % outp, flush=True)
         print("=" * 44, flush=True)
