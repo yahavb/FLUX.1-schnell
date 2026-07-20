@@ -136,12 +136,24 @@ spec:
               echo "  profiled (profiler on)               : ${T_PROF:-N/A}"
               echo "  (compare engine SHARES from run 3, not absolute µs)"
 
-              # ─── persist results + output PNG (single tar.gz to the PVC) ───
-              cp /tmp/flux_out.png "$LOCAL_RESULTS/" 2>/dev/null || true
-              ARCHIVE="/tmp/flux-schnell-bench_results.tar.gz"
-              tar -czf "$ARCHIVE" -C "$(dirname "$LOCAL_RESULTS")" "$(basename "$LOCAL_RESULTS")" 2>/dev/null || true
-              mkdir -p /var/mdl/flux_schnell/runs 2>/dev/null || true
-              cp "$ARCHIVE" "/var/mdl/flux_schnell/runs/" 2>/dev/null && echo "Saved: /var/mdl/flux_schnell/runs/$(basename "$ARCHIVE")" || echo "persist skipped"
+              # ─── PERSIST TO PVC (/var/mdl is S3-backed and SURVIVES the pod; /tmp does
+              #     NOT — the Job's pod is deleted on completion and takes /tmp with it).
+              #     Copy the RAW PNG (viewable, not tarred) to a timestamped dir, LOUDLY:
+              #     no 2>/dev/null hiding a failed copy, and fail the step if the image
+              #     didn't land, so we never silently lose the output. ───
+              TS=$(date +%Y%m%d_%H%M%S)
+              OUT_DIR="/var/mdl/flux_schnell/runs/${TS}"
+              mkdir -p "$OUT_DIR"
+              if [ -f /tmp/flux_out.png ]; then
+                cp /tmp/flux_out.png "$OUT_DIR/flux_out.png"
+                cp "$LOCAL_RESULTS"/*.txt "$OUT_DIR/" 2>/dev/null || true
+                ls -la "$OUT_DIR/flux_out.png"
+                echo "SAVED IMAGE -> $OUT_DIR/flux_out.png   (pull: kubectl cp does NOT work post-Job; read it off the PVC)"
+              else
+                echo "ERROR: /tmp/flux_out.png missing — generation did not produce an image"
+              fi
+              # bonus: full results tar alongside the raw png
+              tar -czf "$OUT_DIR/results.tar.gz" -C "$(dirname "$LOCAL_RESULTS")" "$(basename "$LOCAL_RESULTS")" 2>/dev/null || true
               echo "════════════ BENCH DONE ════════════"
           resources:
             claims:
