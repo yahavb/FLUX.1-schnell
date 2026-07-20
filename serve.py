@@ -127,7 +127,17 @@ def load():
     pipe.text_encoder.to("cpu").eval().requires_grad_(False)
     pipe.text_encoder_2.to("cpu").eval().requires_grad_(False)
     pipe.transformer.to(device)
-    pipe.vae.to(device)
+    # VAE in fp32, NOT bf16. PAVE port (measured): "the SD VAE overflows fp16/low-precision
+    # on Neuron (quality-critical) -> VAE runs fp32; only the UNet/transformer runs bf16."
+    # A bf16 VAE decode overflows -> NaN -> BLANK image (observed). Keep the transformer in
+    # DTYPE (bf16) for speed; decode in fp32 for correctness.
+    pipe.vae.to(device=device, dtype=torch.float32)
+    # diffusers calls self.vae.decode(latents) with the RAW bf16 latents (no cast), so an
+    # fp32 VAE would dtype-mismatch. Wrap decode to upcast the incoming latent to fp32.
+    _orig_decode = pipe.vae.decode
+    def _decode_fp32(z, *a, **k):
+        return _orig_decode(z.to(torch.float32), *a, **k)
+    pipe.vae.decode = _decode_fp32
 
     # With the text encoders on CPU, diffusers' _execution_device property (derived from
     # module placement) resolves to CPU, so the pipeline allocates the initial latents on
