@@ -27,14 +27,13 @@ spec:
         app: flux
     spec:
       nodeSelector:
-        node-type: trn3
+        node-type: trn3-dev1
       resourceClaims:
-        # s-lnc2-trn3 = 1 device = 4 NeuronCores x 24GB = 96GB. TP=4 across the cores.
-        - name: s-lnc2-trn3
-          resourceClaimTemplateName: s-lnc2-trn3
+        - name: neurons
+          resourceClaimTemplateName: s-lnc2
       containers:
         - name: app
-          image: 621547421844.dkr.ecr.us-west-2.amazonaws.com/native-pytorch:2.11.0-neuronx-py312-sdk2.31.0-ubuntu24.04-neurondlcbuilder-development-6486001458-0
+          image: 421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -78,17 +77,15 @@ spec:
               python3 serve.py
           resources:
             claims:
-              - name: s-lnc2-trn3
-            # s-lnc2-trn3 = 1 device/pod -> 16 pods/node. Requests under node/16
-            # (~11 cpu, ~122Gi mem, ~115Gi ephemeral) so 16 stack; limits burst.
+              - name: neurons
             requests:
-              cpu: 10
-              memory: 110Gi
-              ephemeral-storage: 60Gi
+              cpu: 11
+              memory: 120Gi
+              ephemeral-storage: 120Gi
             limits:
-              cpu: 22
-              memory: 122Gi
-              ephemeral-storage: 100Gi
+              cpu: 11 
+              memory: 120Gi
+              ephemeral-storage: 120Gi
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
